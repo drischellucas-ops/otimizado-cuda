@@ -1,0 +1,527 @@
+import os
+import sys
+import cv2
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+from skimage import morphology, segmentation
+from skimage.measure import label, regionprops, regionprops_table
+from skimage.segmentation import clear_border, watershed
+from matplotlib.ticker import FormatStrFormatter
+from scipy import ndimage as ndi
+from skimage.feature import peak_local_max
+from numba import cuda, float32, int32
+import math
+import pillow_heif
+
+# ---------- Ajuste aqui o caminho da imagem ----------
+image_path = r"C:\Users\Adm\Desktop\DSC03244.jpg.jpg"
+
+img = cv2.imread(image_path)
+
+img_B, img_G, img_R = cv2.split(img)
+
+img2 = cv2.merge((img_R, img_G, img_B))
+sys.getsizeof(img2)
+plt.imshow(img2), plt.grid('off'), plt.xticks([]), plt.yticks([]), plt.title('Original RGB Image')
+
+plt.figure(figsize=(12, 8))
+
+plt.subplot(2, 3, 1), plt.imshow(img_B, cmap='gray'), plt.title('Blue Channel'), plt.xticks([]), plt.yticks([])
+plt.subplot(2, 3, 2), plt.imshow(img_G, cmap='gray'), plt.title('Green Channel'), plt.xticks([]), plt.yticks([])
+plt.subplot(2, 3, 3), plt.imshow(img_R, cmap='gray'), plt.title('Red Channel'), plt.xticks([]), plt.yticks([])
+
+plt.subplot(2, 3, 4), plt.imshow(img_B, cmap='jet'), plt.title('Blue Channel (Jet)'), plt.xticks([]), plt.yticks([])
+plt.subplot(2, 3, 5), plt.imshow(img_G, cmap='jet'), plt.title('Green Channel (Jet)'), plt.xticks([]), plt.yticks([])
+plt.subplot(2, 3, 6), plt.imshow(img_R, cmap='jet'), plt.title('Red Channel (Jet)'), plt.xticks([]), plt.yticks([])
+
+plt.tight_layout()
+plt.show()
+
+# Binarize the image using adaptive thresholding on the blue channel
+binImg = cv2.adaptiveThreshold(img_B, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 91, 15)
+
+dst_inv = cv2.bitwise_not((binImg * 255).astype(np.uint8))
+plt.figure()
+plt.title("Binarized Image")
+plt.imshow(dst_inv, cmap='gray')
+plt.axis('off')
+plt.show()
+
+img_clb = clear_border(dst_inv, buffer_size=3, bgval=1)
+"""
+plt.figure()
+plt.title("Image with Cleared Border")
+plt.imshow(img_clb, cmap='gray')
+plt.axis('off')
+plt.show()
+"""
+
+"---------------------------------First Filter--------------------------------------------------------"
+labeled_img = label(img_clb)
+
+y_point = 600
+x_point = 200
+
+# Create a mask to store the filtered result
+filtered_mask = np.zeros_like(img_clb)
+
+# --- KERNEL 1: compute flipped x centroids in parallel (minimal change) ---
+# We'll extract centroid arrays via regionprops_table (needed to pass to CUDA).
+props_table_for_centroids = regionprops_table(labeled_img, properties=('label', 'centroid-0', 'centroid-1'))
+labels_arr = np.array(props_table_for_centroids.get('label', []), dtype=np.int32)
+y_centroids_arr = np.array(props_table_for_centroids.get('centroid-0', []), dtype=np.float32)
+x_centroids_arr = np.array(props_table_for_centroids.get('centroid-1', []), dtype=np.float32)
+
+# Prepare arrays for flipped x result
+image_width = labeled_img.shape[1]
+x_centroids_flipped = np.empty_like(x_centroids_arr)
+
+# CUDA kernel to compute flipped x (very small kernel but follows your request)
+@cuda.jit
+def kernel_flip_x(x_arr, width, out_arr):
+    i = cuda.grid(1)
+    if i < x_arr.shape[0]:
+        out_arr[i] = width - x_arr[i]
+
+# Launch kernel_flip_x
+if x_centroids_arr.size > 0:
+    threads = 256
+    blocks = (x_centroids_arr.size + threads - 1) // threads
+    d_x = cuda.to_device(x_centroids_arr)
+    d_outx = cuda.to_device(x_centroids_flipped)
+    kernel_flip_x[blocks, threads](d_x, image_width, d_outx)
+    d_outx.copy_to_host(x_centroids_flipped)
+else:
+    x_centroids_flipped = x_centroids_arr.copy()
+
+# Keep lists similar to original (y_centroids, x_centroids) for compatibility
+y_centroids = list(y_centroids_arr.tolist())
+x_centroids = list(x_centroids_flipped.tolist())
+
+plt.figure(figsize=(8, 8))
+# When plotting the labeled centroids with numbers we need the original (x,y) positions (not flipped) to place the text.
+# We'll use the original centroids for text, extracted above.
+plt.imshow(cv2.cvtColor(img_clb, cv2.COLOR_BGR2RGB))
+
+# Draw numbers at centroids (preserve original enumerate behavior)
+for i in range(len(labels_arr)):
+    # regionprops used (i+1 numbering) -> we mimic same numbering
+    y = y_centroids_arr[i]
+    x = x_centroids_arr[i]
+    plt.text(x, y, str(i + 1), color='white', fontsize=4, ha='center', va='center')
+
+plt.title('Labeled Regions with Numbers (Before Filtering)')
+plt.axis('off')
+plt.show()
+
+# Filter objects based on both x and y centroids
+filtered_mask = np.zeros_like(labeled_img, dtype=np.uint8)
+
+# --- KERNEL 2: decide which labels to keep based on centroid thresholds ---
+# We'll compute a boolean mask per label in GPU and then use np.isin to build filtered_mask (less change).
+labels_count = labels_arr.size
+keep_bool = np.zeros(labels_count, dtype=np.uint8)
+
+@cuda.jit
+def kernel_check_centroids(y_arr, x_arr, y_th, x_th, out_keep):
+    i = cuda.grid(1)
+    if i < y_arr.shape[0]:
+        yv = y_arr[i]
+        xv = x_arr[i]
+        # NOTE: original code used flipped x for selection; we already computed flipped x in x_centroids_flipped
+        if yv <= y_th and xv > x_th:
+            out_keep[i] = 1
+        else:
+            out_keep[i] = 0
+
+if labels_count > 0:
+    threads = 256
+    blocks = (labels_count + threads - 1) // threads
+    d_y = cuda.to_device(y_centroids_arr)
+    d_xfl = cuda.to_device(x_centroids_flipped)
+    d_keep = cuda.to_device(keep_bool)
+    kernel_check_centroids[blocks, threads](d_y, d_xfl, y_point, x_point, d_keep)
+    d_keep.copy_to_host(keep_bool)
+
+# Convert keep_bool -> keep_labels (same as original logic)
+keep_labels = labels_arr[keep_bool.astype(bool)]
+
+# create filtered_mask by checking label membership (np.isin is efficient, no need to GPU this step)
+if keep_labels.size > 0:
+    filtered_mask[np.isin(labeled_img, keep_labels)] = 255
+else:
+    filtered_mask[:] = 0
+
+# Convert the filtered mask to the appropriate data type (already 0/255)
+filtered_mask = (filtered_mask).astype(np.uint8)
+
+# Apply the filtered mask to the clean image
+img_clb_filtered = cv2.bitwise_and(img_clb, filtered_mask)
+
+# Apply the filtered mask to the original image while keeping the background intact
+masked_rgb = cv2.bitwise_and(img, img, mask=filtered_mask)
+
+# Ensure that the background is white instead of black
+white_background = np.full_like(img, 255)  # Create a white background
+img_outl = np.where(filtered_mask[..., None] == 255, masked_rgb, white_background)  # Apply mask
+
+# Display the corrected filtered image
+plt.figure(figsize=(8, 8))
+plt.imshow(cv2.cvtColor(img_outl, cv2.COLOR_BGR2RGB))
+plt.title('Filtered Objects with Preserved Background')
+plt.axis('off')
+plt.show()
+
+"-----------------------------------------------------------------------------------------------------"
+
+# Apply Gaussian Blur to Reduce Noise
+blurred_image = cv2.GaussianBlur(img_clb_filtered, (3, 3), 0)
+
+# Otsu’s Threshold to Determine an Optimal Threshold
+otsu_threshold, thresholded_img = cv2.threshold(blurred_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+# Canny Edge Detection with Dynamic Thresholds
+edges = cv2.Canny(blurred_image, otsu_threshold * 0.5, otsu_threshold * 1.5)
+
+plt.figure(figsize=(8, 8))
+plt.imshow(edges, cmap='gray')
+plt.title('Detected Edges')
+plt.axis('off')
+plt.show()
+
+# Dilation
+kernel = np.ones((2, 2), np.uint8)
+dst = cv2.dilate(edges, kernel, iterations=1)
+
+plt.figure(figsize=(8, 8))
+plt.imshow(dst, cmap='gray')
+plt.title('Dilated Image')
+plt.axis('off')
+plt.show()
+
+# Fill the closed objects in the dilation
+h, w = dst.shape[:2]
+mask = np.zeros((h + 2, w + 2), np.uint8)
+flooded = dst.copy()
+cv2.floodFill(flooded, mask, (0, 0), 255)
+
+# Invert the filled image
+flood_inv = cv2.bitwise_not(flooded)
+
+# Combine the images to get the background
+im_out = dst | flood_inv
+
+plt.figure(figsize=(8, 8))
+plt.imshow(im_out, cmap='gray')
+plt.title('Filled Objects')
+plt.axis('off')
+plt.show()
+
+"Apply additional morphological operations"
+kernel = np.ones((2, 2), np.uint8)
+imgclose = cv2.morphologyEx(im_out, cv2.MORPH_CLOSE, kernel)
+imgclgr = cv2.morphologyEx(imgclose, cv2.MORPH_GRADIENT, kernel)
+
+plt.figure(figsize=(8, 8))
+plt.imshow(imgclgr, cmap='gray')
+plt.title('Morphological Gradient')
+plt.axis('off')
+plt.show()
+
+# Flood Fill Function
+h, w = imgclgr.shape[:2]
+flood_mask = np.zeros((h + 2, w + 2), np.uint8)  # Create a mask for flood filling
+
+flood_filled_image = imgclgr.copy()
+cv2.floodFill(flood_filled_image, flood_mask, (0, 0), 255)
+flood_inv = cv2.bitwise_not(flood_filled_image)
+final_filled_mask = (flood_inv > 0).astype(np.uint8) * 255
+plt.figure(figsize=(8, 8))
+plt.imshow(final_filled_mask, cmap='gray')
+plt.title('Final Mask')
+plt.axis('off')
+plt.show()
+
+final_result = np.where(final_filled_mask[..., None] == 255,
+                        np.array([255, 255, 255], dtype=np.uint8),
+                        img)
+
+plt.figure(figsize=(8, 8))
+plt.imshow(cv2.cvtColor(final_result, cv2.COLOR_BGR2RGB))
+plt.title('Final Recognized Bubbles')
+plt.axis('off')
+plt.show()
+
+"---------------Second filter-----------------------------------------------------------------------------"
+
+C_Threshold = 0.8  # Circularity threshold
+
+# Label the connected components in the final filled mask
+labeled_bubbles = label(final_filled_mask > 0)
+props = regionprops(labeled_bubbles)
+
+# Count total bubbles and total area before filtering
+# We'll use regionprops_table to get arrays for area and perimeter, so we can run circularity on GPU
+props_tab_for_circ = regionprops_table(labeled_bubbles, properties=('label', 'area', 'perimeter'))
+labels2 = np.array(props_tab_for_circ.get('label', []), dtype=np.int32)
+areas = np.array(props_tab_for_circ.get('area', []), dtype=np.float32)
+perimeters = np.array(props_tab_for_circ.get('perimeter', []), dtype=np.float32)
+
+total_bubbles = labels2.size
+total_area = float(np.sum(areas))
+
+# Create empty masks for accepted/rejected bubbles
+filtered_bubbles_mask = np.zeros_like(final_filled_mask, dtype=np.uint8)
+Overlapping_mask = np.zeros_like(final_filled_mask, dtype=np.uint8)
+
+# Initialize counters for remaining bubbles and remaining area
+remaining_bubbles = 0
+remaining_area = 0
+
+# --- KERNEL 3: compute circularity decisions in parallel ---
+accepted_bool = np.zeros_like(areas, dtype=np.uint8)
+
+@cuda.jit
+def kernel_circularity(area_arr, perim_arr, thresh, out_accept):
+    i = cuda.grid(1)
+    if i < area_arr.shape[0]:
+        a = area_arr[i]
+        p = perim_arr[i]
+        # avoid division by zero
+        if p == 0.0:
+            out_accept[i] = 0
+        else:
+            circ = (4.0 * 3.141592653589793 * a) / (p * p)
+            if circ >= thresh:
+                out_accept[i] = 1
+            else:
+                out_accept[i] = 0
+
+if areas.size > 0:
+    threads = 256
+    blocks = (areas.size + threads - 1) // threads
+    d_areas = cuda.to_device(areas)
+    d_perims = cuda.to_device(perimeters)
+    d_accept = cuda.to_device(accepted_bool)
+    kernel_circularity[blocks, threads](d_areas, d_perims, C_Threshold, d_accept)
+    d_accept.copy_to_host(accepted_bool)
+
+# Build accepted and rejected label lists
+accepted_labels = labels2[accepted_bool.astype(bool)]
+rejected_labels = labels2[~accepted_bool.astype(bool)]
+
+# Fill masks using np.isin (efficient C implementation) to avoid per-pixel Python loops
+if accepted_labels.size > 0:
+    filtered_bubbles_mask[np.isin(labeled_bubbles, accepted_labels)] = 255
+if rejected_labels.size > 0:
+    Overlapping_mask[np.isin(labeled_bubbles, rejected_labels)] = 255
+
+remaining_bubbles = accepted_labels.size
+remaining_area = float(np.sum(areas[accepted_bool.astype(bool)]))
+
+percentage_deleted = ((total_bubbles - remaining_bubbles) / total_bubbles) * 100 if total_bubbles > 0 else 0
+percentage_area_erased = ((total_area - remaining_area) / total_area) * 100 if total_area > 0 else 0
+
+plt.figure(figsize=(8, 8))
+plt.imshow(filtered_bubbles_mask, cmap='gray')
+plt.title('Filtered Bubbles')
+plt.axis('off')
+plt.show()
+
+final_filtered_result = np.where(filtered_bubbles_mask[..., None] == 255,
+                                 np.array([255, 255, 255], dtype=np.uint8),
+                                 img)
+
+plt.figure(figsize=(8, 8))
+plt.imshow(cv2.cvtColor(final_filtered_result, cv2.COLOR_BGR2RGB))
+plt.title('Final Filtered Bubbles')
+plt.axis('off')
+plt.show()
+
+plt.figure(figsize=(8, 8))
+plt.imshow(Overlapping_mask, cmap='gray')
+plt.title('Overlapping bubbles')
+plt.axis('off')
+plt.show()
+
+final_rejected_result = np.where(
+    Overlapping_mask[..., None] == 255,  # Add channel dimension to mask
+    np.array([255, 255, 255], dtype=np.uint8).reshape(1, 1, -1),  # Reshape white color
+    img
+)
+
+plt.figure(figsize=(8, 8))
+plt.imshow(cv2.cvtColor(final_rejected_result, cv2.COLOR_BGR2RGB))
+plt.title('Final Overlapping bubbles')
+plt.axis('off')
+plt.show()
+
+print(f"Total area before filtering: {total_area} pixels")
+print(f"Remaining area (accepted) after filtering: {remaining_area} pixels")
+print(f"Percentage of area erased: {percentage_area_erased:.2f}%")
+print(f"Percentage of deleted bubbles: {percentage_deleted:.2f}%")
+
+print("\n--- Second Filter Results ---")
+print(f"Non-overlapping bubbles: {remaining_bubbles}")
+
+"-------------------------------Watershed------------------------------------------------------------"
+
+labeled_overlapping = label(Overlapping_mask)
+
+# Compute the distance transform
+distance_map = ndi.distance_transform_edt(Overlapping_mask)
+
+plt.figure(figsize=(8,8))
+plt.imshow(distance_map, cmap='jet')
+plt.title('Distance Transform of Overlapping Bubbles')
+plt.axis('off')
+plt.show()
+
+# Find local maxima in the distance-transformed image
+local_max_coords = peak_local_max(
+    distance_map,
+    min_distance=2,
+    threshold_abs=1.5,
+    labels=labeled_overlapping
+)
+
+# Create a mask for the maxima
+maxima_mask = np.zeros_like(distance_map, dtype=bool)
+if local_max_coords.size > 0:
+    maxima_mask[tuple(local_max_coords.T)] = True
+
+# Label the maxima to use them as markers
+markers, _ = ndi.label(maxima_mask)
+
+# Apply the watershed
+labels_ws = watershed(-distance_map, markers, mask=Overlapping_mask)
+
+# Plot the result with circles
+fig, ax = plt.subplots(figsize=(8, 8))
+ax.imshow(Overlapping_mask, cmap='gray')
+ax.set_title('Detected Bubbles with Circles')
+ax.axis('off')
+
+# Draw circles
+for coord in local_max_coords:
+    y, x = coord
+    radius = distance_map[y, x]
+    circ = Circle((x, y), radius=radius, edgecolor='red', facecolor='none', linewidth=0.4)
+    ax.add_patch(circ)
+
+plt.show()
+
+# Count segmented overlapping bubbles
+segmented_overlapping_bubbles = np.max(labels_ws)  # Labels start at 1
+print("\n--- Watershed Results ---")
+print(f"Segmented overlapping bubbles: {segmented_overlapping_bubbles}")
+
+"--------------------- Join the images ------------------------------------------------"
+
+labels_filtered = label(filtered_bubbles_mask)
+
+# Avoid overlap with filtered labels
+if labels_filtered.max() > 0:
+    offset = labels_filtered.max() + 1  # Ensure unique labels
+else:
+    offset = 1
+
+# Combine labels while preserving uniqueness
+final_labels = np.where(labels_ws > 0, labels_ws + offset, labels_filtered)
+
+# Create visualization
+final_segmentation_result = np.where(final_labels[..., None] > 0,
+                                    np.array([255, 255, 255], dtype=np.uint8),
+                                    img)
+
+img2 = cv2.merge((img_R, img_G, img_B))
+sys.getsizeof(img2)
+plt.imshow(img2), plt.grid('off'), plt.xticks([]), plt.yticks([]), plt.title('Original RGB Image')
+
+# Plot with circles
+fig, ax = plt.subplots(figsize=(8, 8))
+ax.imshow(cv2.cvtColor(final_segmentation_result, cv2.COLOR_BGR2RGB))
+ax.set_title('Final Segmentation with Circles')
+ax.axis('off')
+
+# Draw circles using regionprops of final_labels
+for region in regionprops(final_labels):
+    y, x = region.centroid
+    radius = region.equivalent_diameter / 2
+    circ = Circle((x, y), radius=radius, edgecolor='red', facecolor='none', linewidth=0.5)
+    ax.add_patch(circ)
+
+plt.show()
+
+# Count total combined bubbles
+total_combined_bubbles = np.max(final_labels)
+print("\n--- Final Combined Results ---")
+print(f"Total bubbles (non-overlapping + segmented): {total_combined_bubbles}")
+
+"-----------------------------------------------------------------------------------------------------"
+
+# props_final = regionprops(final_labels)  # original
+# props = regionprops(labeled_bubbles)    # original
+
+# We'll compute Area, Diameter, Real_Area using regionprops_table (to produce arrays we can pass to CUDA)
+props_final_tab = regionprops_table(final_labels, properties=('label', 'area'))
+areas_final = np.array(props_final_tab.get('area', []), dtype=np.float32)
+
+Area = []
+Diameter = []
+Real_Area = []
+
+pixel_p = 0.001453171794174 # cm2/px2
+
+# --- KERNEL 4: compute real area and diameter in parallel ---
+diameters_gpu = np.zeros_like(areas_final, dtype=np.float32)  # will hold diameters
+
+@cuda.jit
+def kernel_compute_diameter(area_arr, pixel_per_px, out_diam):
+    i = cuda.grid(1)
+    if i < area_arr.shape[0]:
+        real_area = area_arr[i] * pixel_per_px
+        # avoid negative or zero
+        if real_area <= 0.0:
+            out_diam[i] = 0.0
+        else:
+            out_diam[i] = 2.0 * math.sqrt(real_area / 3.141592653589793)
+
+if areas_final.size > 0:
+    threads = 256
+    blocks = (areas_final.size + threads - 1) // threads
+    d_areas_final = cuda.to_device(areas_final)
+    d_diams = cuda.to_device(diameters_gpu)
+    kernel_compute_diameter[blocks, threads](d_areas_final, pixel_p, d_diams)
+    d_diams.copy_to_host(diameters_gpu)
+
+# Fill lists to keep the same variable names / flow
+Area = areas_final.tolist()
+Real_Area = (areas_final * pixel_p).tolist()
+Diameter = diameters_gpu.tolist()
+
+"""
+plt.figure(figsize=(8, 8))
+plt.imshow(labeled_bubbles, cmap='nipy_spectral')
+plt.title('Labeled Bubbles')
+plt.axis('off')
+plt.show()
+"""
+
+# Extract the base name of the original image
+image_filename = os.path.basename(image_path)
+name, ext = os.path.splitext(image_filename)
+txt_filename = name + ".txt"
+
+save_directory = r"C:\Users\Adm\Desktop\Nova pasta"
+os.makedirs(save_directory, exist_ok=True)
+
+save_path = os.path.join(save_directory, txt_filename)
+
+with open(save_path, "w") as f:
+    for d in Diameter:
+        f.write(f"{d}\n")
+
+print(f"Diâmetros salvos em: {save_path}")
