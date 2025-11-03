@@ -18,42 +18,58 @@ from PIL import Image
 import pandas as pd
 
 # ---------- Ajuste aqui o caminho da imagem ----------
-image_path = r'DSC03493.HIF'
+image_path = r"DSC03493.HIF"
 
-heif_file=pillow_heif.read_heif(image_path)
+heif_file = pillow_heif.read_heif(image_path)
 
-#img = cv2.imread(image_path)
+# img = cv2.imread(image_path)
 
-image=Image.frombytes(heif_file.mode,heif_file.size,heif_file.data)
-img=cv2.cvtColor(np.array(image),cv2.COLOR_RGB2BGR)
+image = Image.frombytes(heif_file.mode, heif_file.size, heif_file.data)
+img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
 img_B, img_G, img_R = cv2.split(img)
 
 img2 = cv2.merge((img_R, img_G, img_B))
 sys.getsizeof(img2)
-plt.imshow(img2), plt.grid('off'), plt.xticks([]), plt.yticks([]), plt.title('Original RGB Image')
+plt.imshow(img2), plt.grid("off"), plt.xticks([]), plt.yticks([]), plt.title(
+    "Original RGB Image"
+)
 
 plt.figure(figsize=(12, 8))
 
-plt.subplot(2, 3, 1), plt.imshow(img_B, cmap='gray'), plt.title('Blue Channel'), plt.xticks([]), plt.yticks([])
-plt.subplot(2, 3, 2), plt.imshow(img_G, cmap='gray'), plt.title('Green Channel'), plt.xticks([]), plt.yticks([])
-plt.subplot(2, 3, 3), plt.imshow(img_R, cmap='gray'), plt.title('Red Channel'), plt.xticks([]), plt.yticks([])
+plt.subplot(2, 3, 1), plt.imshow(img_B, cmap="gray"), plt.title(
+    "Blue Channel"
+), plt.xticks([]), plt.yticks([])
+plt.subplot(2, 3, 2), plt.imshow(img_G, cmap="gray"), plt.title(
+    "Green Channel"
+), plt.xticks([]), plt.yticks([])
+plt.subplot(2, 3, 3), plt.imshow(img_R, cmap="gray"), plt.title(
+    "Red Channel"
+), plt.xticks([]), plt.yticks([])
 
-plt.subplot(2, 3, 4), plt.imshow(img_B, cmap='jet'), plt.title('Blue Channel (Jet)'), plt.xticks([]), plt.yticks([])
-plt.subplot(2, 3, 5), plt.imshow(img_G, cmap='jet'), plt.title('Green Channel (Jet)'), plt.xticks([]), plt.yticks([])
-plt.subplot(2, 3, 6), plt.imshow(img_R, cmap='jet'), plt.title('Red Channel (Jet)'), plt.xticks([]), plt.yticks([])
+plt.subplot(2, 3, 4), plt.imshow(img_B, cmap="jet"), plt.title(
+    "Blue Channel (Jet)"
+), plt.xticks([]), plt.yticks([])
+plt.subplot(2, 3, 5), plt.imshow(img_G, cmap="jet"), plt.title(
+    "Green Channel (Jet)"
+), plt.xticks([]), plt.yticks([])
+plt.subplot(2, 3, 6), plt.imshow(img_R, cmap="jet"), plt.title(
+    "Red Channel (Jet)"
+), plt.xticks([]), plt.yticks([])
 
 plt.tight_layout()
 plt.show()
 
 # Binarize the image using adaptive thresholding on the blue channel
-binImg = cv2.adaptiveThreshold(img_B, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 91, 15)
+binImg = cv2.adaptiveThreshold(
+    img_B, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 91, 15
+)
 
 dst_inv = cv2.bitwise_not((binImg * 255).astype(np.uint8))
 plt.figure()
 plt.title("Binarized Image")
-plt.imshow(dst_inv, cmap='gray')
-plt.axis('off')
+plt.imshow(dst_inv, cmap="gray")
+plt.axis("off")
 plt.show()
 
 img_clb = clear_border(dst_inv, buffer_size=3, bgval=1)
@@ -76,16 +92,23 @@ filtered_mask = np.zeros_like(img_clb)
 
 # --- KERNEL 1: compute flipped x centroids in parallel (minimal change) ---
 # We'll extract centroid arrays via regionprops_table (needed to pass to CUDA).
-props_table_for_centroids = regionprops_table(labeled_img, properties=('label', 'centroid'))
+props_table_for_centroids = regionprops_table(
+    labeled_img, properties=("label", "centroid")
+)
 df = pd.DataFrame(props_table_for_centroids)
 
-labels_arr = np.array(props_table_for_centroids.get('label', []), dtype=np.int32)
-y_centroids_arr = np.array(props_table_for_centroids.get('centroid-0', []), dtype=np.float32)
-x_centroids_arr = np.array(props_table_for_centroids.get('centroid-1', []), dtype=np.float32)
+labels_arr = np.array(props_table_for_centroids.get("label", []), dtype=np.int32)
+y_centroids_arr = np.array(
+    props_table_for_centroids.get("centroid-0", []), dtype=np.float32
+)
+x_centroids_arr = np.array(
+    props_table_for_centroids.get("centroid-1", []), dtype=np.float32
+)
 
 # Prepare arrays for flipped x result
 image_width = labeled_img.shape[1]
 x_centroids_flipped = np.empty_like(x_centroids_arr)
+
 
 # CUDA kernel to compute flipped x (very small kernel but follows your request)
 @cuda.jit
@@ -93,6 +116,7 @@ def kernel_flip_x(x_arr, width, out_arr):
     i = cuda.grid(1)
     if i < x_arr.shape[0]:
         out_arr[i] = width - x_arr[i]
+
 
 # Launch kernel_flip_x
 if x_centroids_arr.size > 0:
@@ -122,10 +146,10 @@ for i in range(len(labels_arr)):
     # regionprops used (i+1 numbering) -> we mimic same numbering
     y = y_centroids_arr[i]
     x = x_centroids_arr[i]
-    plt.text(x, y, str(i + 1), color='white', fontsize=4, ha='center', va='center')
+    plt.text(x, y, str(i + 1), color="white", fontsize=4, ha="center", va="center")
 
-plt.title('Labeled Regions with Numbers (Before Filtering)')
-plt.axis('off')
+plt.title("Labeled Regions with Numbers (Before Filtering)")
+plt.axis("off")
 plt.show()
 
 # Filter objects based on both x and y centroids
@@ -135,6 +159,7 @@ filtered_mask = np.zeros_like(labeled_img, dtype=np.uint8)
 # We'll compute a boolean mask per label in GPU and then use np.isin to build filtered_mask (less change).
 labels_count = labels_arr.size
 keep_bool = np.zeros(labels_count, dtype=np.uint8)
+
 
 @cuda.jit
 def kernel_check_centroids(y_arr, x_arr, y_th, x_th, out_keep):
@@ -147,6 +172,7 @@ def kernel_check_centroids(y_arr, x_arr, y_th, x_th, out_keep):
             out_keep[i] = 1
         else:
             out_keep[i] = 0
+
 
 if labels_count > 0:
     threads = 256
@@ -177,13 +203,15 @@ masked_rgb = cv2.bitwise_and(img, img, mask=filtered_mask)
 
 # Ensure that the background is white instead of black
 white_background = np.full_like(img, 255)  # Create a white background
-img_outl = np.where(filtered_mask[..., None] == 255, masked_rgb, white_background)  # Apply mask
+img_outl = np.where(
+    filtered_mask[..., None] == 255, masked_rgb, white_background
+)  # Apply mask
 
 # Display the corrected filtered image
 plt.figure(figsize=(8, 8))
 plt.imshow(cv2.cvtColor(img_outl, cv2.COLOR_BGR2RGB))
-plt.title('Filtered Objects with Preserved Background')
-plt.axis('off')
+plt.title("Filtered Objects with Preserved Background")
+plt.axis("off")
 plt.show()
 
 "-----------------------------------------------------------------------------------------------------"
@@ -192,15 +220,17 @@ plt.show()
 blurred_image = cv2.GaussianBlur(img_clb_filtered, (3, 3), 0)
 
 # Otsu’s Threshold to Determine an Optimal Threshold
-otsu_threshold, thresholded_img = cv2.threshold(blurred_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+otsu_threshold, thresholded_img = cv2.threshold(
+    blurred_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+)
 
 # Canny Edge Detection with Dynamic Thresholds
 edges = cv2.Canny(blurred_image, otsu_threshold * 0.5, otsu_threshold * 1.5)
 
 plt.figure(figsize=(8, 8))
-plt.imshow(edges, cmap='gray')
-plt.title('Detected Edges')
-plt.axis('off')
+plt.imshow(edges, cmap="gray")
+plt.title("Detected Edges")
+plt.axis("off")
 plt.show()
 
 # Dilation
@@ -208,9 +238,9 @@ kernel = np.ones((2, 2), np.uint8)
 dst = cv2.dilate(edges, kernel, iterations=1)
 
 plt.figure(figsize=(8, 8))
-plt.imshow(dst, cmap='gray')
-plt.title('Dilated Image')
-plt.axis('off')
+plt.imshow(dst, cmap="gray")
+plt.title("Dilated Image")
+plt.axis("off")
 plt.show()
 
 # Fill the closed objects in the dilation
@@ -226,9 +256,9 @@ flood_inv = cv2.bitwise_not(flooded)
 im_out = dst | flood_inv
 
 plt.figure(figsize=(8, 8))
-plt.imshow(im_out, cmap='gray')
-plt.title('Filled Objects')
-plt.axis('off')
+plt.imshow(im_out, cmap="gray")
+plt.title("Filled Objects")
+plt.axis("off")
 plt.show()
 
 "Apply additional morphological operations"
@@ -237,9 +267,9 @@ imgclose = cv2.morphologyEx(im_out, cv2.MORPH_CLOSE, kernel)
 imgclgr = cv2.morphologyEx(imgclose, cv2.MORPH_GRADIENT, kernel)
 
 plt.figure(figsize=(8, 8))
-plt.imshow(imgclgr, cmap='gray')
-plt.title('Morphological Gradient')
-plt.axis('off')
+plt.imshow(imgclgr, cmap="gray")
+plt.title("Morphological Gradient")
+plt.axis("off")
 plt.show()
 
 # Flood Fill Function
@@ -251,19 +281,19 @@ cv2.floodFill(flood_filled_image, flood_mask, (0, 0), 255)
 flood_inv = cv2.bitwise_not(flood_filled_image)
 final_filled_mask = (flood_inv > 0).astype(np.uint8) * 255
 plt.figure(figsize=(8, 8))
-plt.imshow(final_filled_mask, cmap='gray')
-plt.title('Final Mask')
-plt.axis('off')
+plt.imshow(final_filled_mask, cmap="gray")
+plt.title("Final Mask")
+plt.axis("off")
 plt.show()
 
-final_result = np.where(final_filled_mask[..., None] == 255,
-                        np.array([255, 255, 255], dtype=np.uint8),
-                        img)
+final_result = np.where(
+    final_filled_mask[..., None] == 255, np.array([255, 255, 255], dtype=np.uint8), img
+)
 
 plt.figure(figsize=(8, 8))
 plt.imshow(cv2.cvtColor(final_result, cv2.COLOR_BGR2RGB))
-plt.title('Final Recognized Bubbles')
-plt.axis('off')
+plt.title("Final Recognized Bubbles")
+plt.axis("off")
 plt.show()
 
 "---------------Second filter-----------------------------------------------------------------------------"
@@ -276,10 +306,12 @@ props = regionprops(labeled_bubbles)
 
 # Count total bubbles and total area before filtering
 # We'll use regionprops_table to get arrays for area and perimeter, so we can run circularity on GPU
-props_tab_for_circ = regionprops_table(labeled_bubbles, properties=('label', 'area', 'perimeter'))
-labels2 = np.array(props_tab_for_circ.get('label', []), dtype=np.int32)
-areas = np.array(props_tab_for_circ.get('area', []), dtype=np.float32)
-perimeters = np.array(props_tab_for_circ.get('perimeter', []), dtype=np.float32)
+props_tab_for_circ = regionprops_table(
+    labeled_bubbles, properties=("label", "area", "perimeter")
+)
+labels2 = np.array(props_tab_for_circ.get("label", []), dtype=np.int32)
+areas = np.array(props_tab_for_circ.get("area", []), dtype=np.float32)
+perimeters = np.array(props_tab_for_circ.get("perimeter", []), dtype=np.float32)
 
 total_bubbles = labels2.size
 total_area = float(np.sum(areas))
@@ -294,6 +326,7 @@ remaining_area = 0
 
 # --- KERNEL 3: compute circularity decisions in parallel ---
 accepted_bool = np.zeros_like(areas, dtype=np.uint8)
+
 
 @cuda.jit
 def kernel_circularity(area_arr, perim_arr, thresh, out_accept):
@@ -310,6 +343,7 @@ def kernel_circularity(area_arr, perim_arr, thresh, out_accept):
                 out_accept[i] = 1
             else:
                 out_accept[i] = 0
+
 
 if areas.size > 0:
     threads = 256
@@ -333,41 +367,49 @@ if rejected_labels.size > 0:
 remaining_bubbles = accepted_labels.size
 remaining_area = float(np.sum(areas[accepted_bool.astype(bool)]))
 
-percentage_deleted = ((total_bubbles - remaining_bubbles) / total_bubbles) * 100 if total_bubbles > 0 else 0
-percentage_area_erased = ((total_area - remaining_area) / total_area) * 100 if total_area > 0 else 0
+percentage_deleted = (
+    ((total_bubbles - remaining_bubbles) / total_bubbles) * 100
+    if total_bubbles > 0
+    else 0
+)
+percentage_area_erased = (
+    ((total_area - remaining_area) / total_area) * 100 if total_area > 0 else 0
+)
 
 plt.figure(figsize=(8, 8))
-plt.imshow(filtered_bubbles_mask, cmap='gray')
-plt.title('Filtered Bubbles')
-plt.axis('off')
+plt.imshow(filtered_bubbles_mask, cmap="gray")
+plt.title("Filtered Bubbles")
+plt.axis("off")
 plt.show()
 
-final_filtered_result = np.where(filtered_bubbles_mask[..., None] == 255,
-                                 np.array([255, 255, 255], dtype=np.uint8),
-                                 img)
+final_filtered_result = np.where(
+    filtered_bubbles_mask[..., None] == 255,
+    np.array([255, 255, 255], dtype=np.uint8),
+    img,
+)
 
 plt.figure(figsize=(8, 8))
 plt.imshow(cv2.cvtColor(final_filtered_result, cv2.COLOR_BGR2RGB))
-plt.title('Final Filtered Bubbles')
-plt.axis('off')
+plt.title("Final Filtered Bubbles")
+plt.axis("off")
 plt.show()
 
 plt.figure(figsize=(8, 8))
-plt.imshow(Overlapping_mask, cmap='gray')
-plt.title('Overlapping bubbles')
-plt.axis('off')
+plt.imshow(Overlapping_mask, cmap="gray")
+plt.title("Overlapping bubbles")
+plt.axis("off")
 plt.show()
 
 final_rejected_result = np.where(
     Overlapping_mask[..., None] == 255,  # Add channel dimension to mask
     np.array([255, 255, 255], dtype=np.uint8).reshape(1, 1, -1),  # Reshape white color
-    img
+    img,
 )
 
 plt.figure(figsize=(8, 8))
 plt.imshow(cv2.cvtColor(final_rejected_result, cv2.COLOR_BGR2RGB))
-plt.title('Final Overlapping bubbles')
-plt.axis('off')
+plt.title("Final Overlapping bubbles")
+plt.axis("off")
 plt.show()
 
 print(f"Total area before filtering: {total_area} pixels")
@@ -385,18 +427,15 @@ labeled_overlapping = label(Overlapping_mask)
 # Compute the distance transform
 distance_map = ndi.distance_transform_edt(Overlapping_mask)
 
-plt.figure(figsize=(8,8))
-plt.imshow(distance_map, cmap='jet')
-plt.title('Distance Transform of Overlapping Bubbles')
-plt.axis('off')
+plt.figure(figsize=(8, 8))
+plt.imshow(distance_map, cmap="jet")
+plt.title("Distance Transform of Overlapping Bubbles")
+plt.axis("off")
 plt.show()
 
 # Find local maxima in the distance-transformed image
 local_max_coords = peak_local_max(
-    distance_map,
-    min_distance=2,
-    threshold_abs=1.5,
-    labels=labeled_overlapping
+    distance_map, min_distance=2, threshold_abs=1.5, labels=labeled_overlapping
 )
 
 # Create a mask for the maxima
@@ -412,15 +451,17 @@ labels_ws = watershed(-distance_map, markers, mask=Overlapping_mask)
 
 # Plot the result with circles
 fig, ax = plt.subplots(figsize=(8, 8))
-ax.imshow(Overlapping_mask, cmap='gray')
-ax.set_title('Detected Bubbles with Circles')
-ax.axis('off')
+ax.imshow(Overlapping_mask, cmap="gray")
+ax.set_title("Detected Bubbles with Circles")
+ax.axis("off")
 
 # Draw circles
 for coord in local_max_coords:
     y, x = coord
     radius = distance_map[y, x]
-    circ = Circle((x, y), radius=radius, edgecolor='red', facecolor='none', linewidth=0.4)
+    circ = Circle(
+        (x, y), radius=radius, edgecolor="red", facecolor="none", linewidth=0.4
+    )
     ax.add_patch(circ)
 
 plt.show()
@@ -444,25 +485,29 @@ else:
 final_labels = np.where(labels_ws > 0, labels_ws + offset, labels_filtered)
 
 # Create visualization
-final_segmentation_result = np.where(final_labels[..., None] > 0,
-                                    np.array([255, 255, 255], dtype=np.uint8),
-                                    img)
+final_segmentation_result = np.where(
+    final_labels[..., None] > 0, np.array([255, 255, 255], dtype=np.uint8), img
+)
 
 img2 = cv2.merge((img_R, img_G, img_B))
 sys.getsizeof(img2)
-plt.imshow(img2), plt.grid('off'), plt.xticks([]), plt.yticks([]), plt.title('Original RGB Image')
+plt.imshow(img2), plt.grid("off"), plt.xticks([]), plt.yticks([]), plt.title(
+    "Original RGB Image"
+)
 
 # Plot with circles
 fig, ax = plt.subplots(figsize=(8, 8))
 ax.imshow(cv2.cvtColor(final_segmentation_result, cv2.COLOR_BGR2RGB))
-ax.set_title('Final Segmentation with Circles')
-ax.axis('off')
+ax.set_title("Final Segmentation with Circles")
+ax.axis("off")
 
 # Draw circles using regionprops of final_labels
 for region in regionprops(final_labels):
     y, x = region.centroid
     radius = region.equivalent_diameter / 2
-    circ = Circle((x, y), radius=radius, edgecolor='red', facecolor='none', linewidth=0.5)
+    circ = Circle(
+        (x, y), radius=radius, edgecolor="red", facecolor="none", linewidth=0.5
+    )
     ax.add_patch(circ)
 
 plt.show()
@@ -478,17 +523,18 @@ print(f"Total bubbles (non-overlapping + segmented): {total_combined_bubbles}")
 # props = regionprops(labeled_bubbles)    # original
 
 # We'll compute Area, Diameter, Real_Area using regionprops_table (to produce arrays we can pass to CUDA)
-props_final_tab = regionprops_table(final_labels, properties=('label', 'area'))
-areas_final = np.array(props_final_tab.get('area', []), dtype=np.float32)
+props_final_tab = regionprops_table(final_labels, properties=("label", "area"))
+areas_final = np.array(props_final_tab.get("area", []), dtype=np.float32)
 
 Area = []
 Diameter = []
 Real_Area = []
 
-pixel_p = 0.001453171794174 # cm2/px2
+pixel_p = 0.001453171794174  # cm2/px2
 
 # --- KERNEL 4: compute real area and diameter in parallel ---
 diameters_gpu = np.zeros_like(areas_final, dtype=np.float32)  # will hold diameters
+
 
 @cuda.jit
 def kernel_compute_diameter(area_arr, pixel_per_px, out_diam):
@@ -500,6 +546,7 @@ def kernel_compute_diameter(area_arr, pixel_per_px, out_diam):
             out_diam[i] = 0.0
         else:
             out_diam[i] = 2.0 * math.sqrt(real_area / 3.141592653589793)
+
 
 if areas_final.size > 0:
     threads = 256
