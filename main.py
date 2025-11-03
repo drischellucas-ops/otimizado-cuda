@@ -14,11 +14,18 @@ from skimage.feature import peak_local_max
 from numba import cuda, float32, int32
 import math
 import pillow_heif
+from PIL import Image
+import pandas as pd
 
 # ---------- Ajuste aqui o caminho da imagem ----------
-image_path = r"C:\Users\Adm\Desktop\DSC03244.jpg.jpg"
+image_path = r'DSC03493.HIF'
 
-img = cv2.imread(image_path)
+heif_file=pillow_heif.read_heif(image_path)
+
+#img = cv2.imread(image_path)
+
+image=Image.frombytes(heif_file.mode,heif_file.size,heif_file.data)
+img=cv2.cvtColor(np.array(image),cv2.COLOR_RGB2BGR)
 
 img_B, img_G, img_R = cv2.split(img)
 
@@ -69,7 +76,9 @@ filtered_mask = np.zeros_like(img_clb)
 
 # --- KERNEL 1: compute flipped x centroids in parallel (minimal change) ---
 # We'll extract centroid arrays via regionprops_table (needed to pass to CUDA).
-props_table_for_centroids = regionprops_table(labeled_img, properties=('label', 'centroid-0', 'centroid-1'))
+props_table_for_centroids = regionprops_table(labeled_img, properties=('label', 'centroid'))
+df = pd.DataFrame(props_table_for_centroids)
+
 labels_arr = np.array(props_table_for_centroids.get('label', []), dtype=np.int32)
 y_centroids_arr = np.array(props_table_for_centroids.get('centroid-0', []), dtype=np.float32)
 x_centroids_arr = np.array(props_table_for_centroids.get('centroid-1', []), dtype=np.float32)
@@ -89,10 +98,13 @@ def kernel_flip_x(x_arr, width, out_arr):
 if x_centroids_arr.size > 0:
     threads = 256
     blocks = (x_centroids_arr.size + threads - 1) // threads
+
     d_x = cuda.to_device(x_centroids_arr)
     d_outx = cuda.to_device(x_centroids_flipped)
+
     kernel_flip_x[blocks, threads](d_x, image_width, d_outx)
-    d_outx.copy_to_host(x_centroids_flipped)
+
+    x_centroids_flipped = d_outx.copy_to_host()
 else:
     x_centroids_flipped = x_centroids_arr.copy()
 
