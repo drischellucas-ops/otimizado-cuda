@@ -1,3 +1,6 @@
+import time
+start_total = time.time()
+
 import os
 import sys
 import cv2
@@ -13,11 +16,21 @@ from scipy import ndimage as ndi
 from skimage.feature import peak_local_max
 from numba import cuda, float32, int32
 import math
+from PIL import Image 
+import pillow_heif
 
 # ---------- Ajuste aqui o caminho da imagem ----------
-image_path = r"C:\Users\Adm\Desktop\DSC03244.jpg.jpg"
+image_path = r"C:\Users\drisc\OneDrive\Desktop\DSC03536.HIF"
 
-img = cv2.imread(image_path)
+heif_file=pillow_heif.read_heif(image_path)
+
+image=Image.frombytes(
+    heif_file.mode,
+    heif_file.size,
+    heif_file.data
+)
+
+img = cv2.cvtColor(np.array(image),cv2.COLOR_RGB2BGR)
 
 img_B, img_G, img_R = cv2.split(img)
 
@@ -37,6 +50,8 @@ plt.subplot(2, 3, 6), plt.imshow(img_R, cmap='jet'), plt.title('Red Channel (Jet
 
 plt.tight_layout()
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 # Binarize the image using adaptive thresholding on the blue channel
 binImg = cv2.adaptiveThreshold(img_B, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 91, 15)
@@ -47,6 +62,8 @@ plt.title("Binarized Image")
 plt.imshow(dst_inv, cmap='gray')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 img_clb = clear_border(dst_inv, buffer_size=3, bgval=1)
 """
@@ -55,20 +72,22 @@ plt.title("Image with Cleared Border")
 plt.imshow(img_clb, cmap='gray')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 """
 
 "---------------------------------First Filter--------------------------------------------------------"
 labeled_img = label(img_clb)
 
-y_point = 600
-x_point = 200
+y_point = 99999
+x_point = -1
 
 # Create a mask to store the filtered result
 filtered_mask = np.zeros_like(img_clb)
 
 # --- KERNEL 1: compute flipped x centroids in parallel (minimal change) ---
 # We'll extract centroid arrays via regionprops_table (needed to pass to CUDA).
-props_table_for_centroids = regionprops_table(labeled_img, properties=('label', 'centroid-0', 'centroid-1'))
+props_table_for_centroids = regionprops_table(labeled_img, properties=('label','centroid'))
 labels_arr = np.array(props_table_for_centroids.get('label', []), dtype=np.int32)
 y_centroids_arr = np.array(props_table_for_centroids.get('centroid-0', []), dtype=np.float32)
 x_centroids_arr = np.array(props_table_for_centroids.get('centroid-1', []), dtype=np.float32)
@@ -114,6 +133,8 @@ for i in range(len(labels_arr)):
 plt.title('Labeled Regions with Numbers (Before Filtering)')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 # Filter objects based on both x and y centroids
 filtered_mask = np.zeros_like(labeled_img, dtype=np.uint8)
@@ -172,6 +193,8 @@ plt.imshow(cv2.cvtColor(img_outl, cv2.COLOR_BGR2RGB))
 plt.title('Filtered Objects with Preserved Background')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 "-----------------------------------------------------------------------------------------------------"
 
@@ -189,6 +212,8 @@ plt.imshow(edges, cmap='gray')
 plt.title('Detected Edges')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 # Dilation
 kernel = np.ones((2, 2), np.uint8)
@@ -199,6 +224,8 @@ plt.imshow(dst, cmap='gray')
 plt.title('Dilated Image')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 # Fill the closed objects in the dilation
 h, w = dst.shape[:2]
@@ -217,6 +244,8 @@ plt.imshow(im_out, cmap='gray')
 plt.title('Filled Objects')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 "Apply additional morphological operations"
 kernel = np.ones((2, 2), np.uint8)
@@ -228,6 +257,8 @@ plt.imshow(imgclgr, cmap='gray')
 plt.title('Morphological Gradient')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 # Flood Fill Function
 h, w = imgclgr.shape[:2]
@@ -242,6 +273,8 @@ plt.imshow(final_filled_mask, cmap='gray')
 plt.title('Final Mask')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 final_result = np.where(final_filled_mask[..., None] == 255,
                         np.array([255, 255, 255], dtype=np.uint8),
@@ -252,6 +285,8 @@ plt.imshow(cv2.cvtColor(final_result, cv2.COLOR_BGR2RGB))
 plt.title('Final Recognized Bubbles')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 "---------------Second filter-----------------------------------------------------------------------------"
 
@@ -328,6 +363,8 @@ plt.imshow(filtered_bubbles_mask, cmap='gray')
 plt.title('Filtered Bubbles')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 final_filtered_result = np.where(filtered_bubbles_mask[..., None] == 255,
                                  np.array([255, 255, 255], dtype=np.uint8),
@@ -338,12 +375,16 @@ plt.imshow(cv2.cvtColor(final_filtered_result, cv2.COLOR_BGR2RGB))
 plt.title('Final Filtered Bubbles')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 plt.figure(figsize=(8, 8))
 plt.imshow(Overlapping_mask, cmap='gray')
 plt.title('Overlapping bubbles')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 final_rejected_result = np.where(
     Overlapping_mask[..., None] == 255,  # Add channel dimension to mask
@@ -356,6 +397,8 @@ plt.imshow(cv2.cvtColor(final_rejected_result, cv2.COLOR_BGR2RGB))
 plt.title('Final Overlapping bubbles')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 print(f"Total area before filtering: {total_area} pixels")
 print(f"Remaining area (accepted) after filtering: {remaining_area} pixels")
@@ -377,6 +420,8 @@ plt.imshow(distance_map, cmap='jet')
 plt.title('Distance Transform of Overlapping Bubbles')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 # Find local maxima in the distance-transformed image
 local_max_coords = peak_local_max(
@@ -411,6 +456,8 @@ for coord in local_max_coords:
     ax.add_patch(circ)
 
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 # Count segmented overlapping bubbles
 segmented_overlapping_bubbles = np.max(labels_ws)  # Labels start at 1
@@ -453,6 +500,8 @@ for region in regionprops(final_labels):
     ax.add_patch(circ)
 
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 
 # Count total combined bubbles
 total_combined_bubbles = np.max(final_labels)
@@ -472,7 +521,7 @@ Area = []
 Diameter = []
 Real_Area = []
 
-pixel_p = 0.001453171794174 # cm2/px2
+pixel_p = 0.00166666 # cm2/px2
 
 # --- KERNEL 4: compute real area and diameter in parallel ---
 diameters_gpu = np.zeros_like(areas_final, dtype=np.float32)  # will hold diameters
@@ -507,6 +556,8 @@ plt.imshow(labeled_bubbles, cmap='nipy_spectral')
 plt.title('Labeled Bubbles')
 plt.axis('off')
 plt.show()
+print(f"[TIMER] Tempo parcial: {time.time() - start_total:.2f}s")
+start_total = time.time()
 """
 
 # Extract the base name of the original image
@@ -514,7 +565,7 @@ image_filename = os.path.basename(image_path)
 name, ext = os.path.splitext(image_filename)
 txt_filename = name + ".txt"
 
-save_directory = r"C:\Users\Adm\Desktop\Nova pasta"
+save_directory = r"C:\Users\drisc\OneDrive\Desktop\nova pasta"
 os.makedirs(save_directory, exist_ok=True)
 
 save_path = os.path.join(save_directory, txt_filename)
@@ -524,3 +575,4 @@ with open(save_path, "w") as f:
         f.write(f"{d}\n")
 
 print(f"Diâmetros salvos em: {save_path}")
+print(f"\n[TIMER] Tempo total de execução: {time.time() - start_total:.2f}s")
